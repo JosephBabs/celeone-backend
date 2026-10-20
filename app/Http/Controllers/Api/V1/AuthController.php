@@ -95,7 +95,7 @@ class AuthController extends Controller
     private function tokens(User $user, Request $request): array
     {
         if (!$user->password_migrated_at) {
-            $user->forceFill([
+            $user->forceFill([ 
                 'password_migrated_at' => now(),
             ])->save();
         }
