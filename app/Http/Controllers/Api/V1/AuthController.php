@@ -176,11 +176,11 @@ class AuthController extends Controller
      * PATCH /me/profile
      *
      * Compatible with the currently published app:
-     * firstName, lastName, displayName, parish, phone, email, photoURL.
+     * firstName, lastName, displayName, parish, phone, email, photoURL. 
      */
     public function updateProfile(Request $request)
     {
-        $user = $request->user();
+        $user = $request->user_data();
 
         $data = $request->validate([
             'firstName' => 'sometimes|required|string|max:120',

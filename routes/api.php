@@ -129,7 +129,6 @@ Route::prefix('v1')->middleware(AssignRequestId::class)->group(function (): void
         // Compatibility alias for mobile builds that used /auth/me.
         Route::get('auth/me', [AuthController::class, 'me']);
         Route::get('me/profile', [AuthController::class, 'me']);
-        Route::patch('me/profile', [AuthController::class, 'updateProfile']);
 
         // Keep the legacy endpoint if older app builds use it. 
         Route::patch('me/profile', [AuthController::class, 'updateProfile']);
