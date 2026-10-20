@@ -128,6 +128,30 @@ Route::prefix('v1')->middleware(AssignRequestId::class)->group(function (): void
         Route::post('youth/quizzes/{quiz}/attempt', [QuizAttemptController::class, 'store'])->middleware('throttle:20,1');
         // Compatibility alias for mobile builds that used /auth/me.
         Route::get('auth/me', [AuthController::class, 'me']);
+        Route::get('me/profile', [AuthController::class, 'me']);
+        Route::patch('me/profile', [AuthController::class, 'updateProfile']);
+
+        // Keep the legacy endpoint if older app builds use it. 
+        Route::patch('me/profile', [AuthController::class, 'updateProfile']);
+        Route::patch('me/profile/avatar', [AuthController::class, 'updateAvatar']);
+        Route::patch('me/profile/cover', [AuthController::class, 'updateCover']);
+        Route::patch('me/profile/password', [AuthController::class, 'updatePassword']);
+        Route::patch('me/profile/email', [AuthController::class, 'updateEmail']);
+        Route::patch('me/profile/phone', [AuthController::class, 'updatePhone']);
+        Route::patch('me/profile/username', [AuthController::class, 'updateUsername']);
+        Route::patch('me/profile/bio', [AuthController::class, 'updateBio']);
+        Route::patch('me/profile/location', [AuthController::class, 'updateLocation']);
+        Route::patch('me/profile/birthdate', [AuthController::class, 'updateBirthdate']);
+        Route::patch('me/profile/gender', [AuthController::class, 'updateGender']);
+        Route::patch('me/profile/interests', [AuthController::class, 'updateInterests']);
+        Route::patch('me/profile/notifications', [AuthController::class, 'updateNotifications']);
+        Route::patch('me/profile/privacy', [AuthController::class, 'updatePrivacy']);
+        Route::patch('me/profile/connected-accounts', [AuthController::class, 'updateConnectedAccounts']);
+        Route::patch('me/profile/linked-accounts', [AuthController::class, 'updateLinkedAccounts']);
+        Route::patch('me/profile/blocked-users', [AuthController::class, 'updateBlockedUsers']);
+        Route::patch('me/profile/hidden-content', [AuthController::class, 'updateHiddenContent']);
+        Route::patch('me/profile/verified-status', [AuthController::class, 'updateVerifiedStatus']);
+        Route::patch('me/profile/creator-status', [AuthController::class, 'updateCreatorStatus']);
         Route::post('auth/logout', [AuthController::class, 'logout']);
         Route::post('auth/confirm-password', [AuthController::class, 'confirmPassword'])->middleware('throttle:5,1');
         Route::post('socket/token', SocketTokenController::class);
@@ -210,10 +234,10 @@ Route::prefix('v1')->middleware(AssignRequestId::class)->group(function (): void
 });
 
 // Cèlè One Laravel-first FCM push routes (V20)
-require __DIR__.'/celeone_push.php';
+require __DIR__ . '/celeone_push.php';
 
 // Cèlè Market API
-require __DIR__.'/celeone_marketplace.php';
+require __DIR__ . '/celeone_marketplace.php';
 
 // Cèlè One management console — Laravel/PostgreSQL only
 require base_path('routes/celeone_management.php');
