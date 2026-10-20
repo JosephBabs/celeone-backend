@@ -131,7 +131,11 @@ Route::prefix('v1')->middleware(AssignRequestId::class)->group(function (): void
         Route::get('me/profile', [AuthController::class, 'me']);
         Route::patch('me/profile', [AuthController::class, 'updateProfile']);
 
+<<<<<<< HEAD
         // Keep the legacy endpoint if older app builds use it. 
+=======
+        // Keep the legacy endpoint if older app builds use it.
+>>>>>>> main
         Route::patch('me/profile', [AuthController::class, 'updateProfile']);
         Route::patch('me/profile/avatar', [AuthController::class, 'updateAvatar']);
         Route::patch('me/profile/cover', [AuthController::class, 'updateCover']);
