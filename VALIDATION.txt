@@ -1,0 +1,19 @@
+CÈLÈ ONE API/BACKEND INTEGRATION FIX VALIDATION — 2026-09-18
+
+Backend:
+- 83 PHP files linted with php -l: PASS
+- socket/server.mjs node --check: PASS
+
+Modified mobile files transpile diagnostics:
+- src/backend/apiClient.ts: 0
+- src/backend/firestoreCompat.ts: 0
+- src/backend/storageCompat.ts: 0
+- src/chat/socket.ts: 0
+- src/presentation/modules/Social/index.tsx: 0
+- src/presentation/modules/Social/social_pro/LiveFeatures.tsx: 0
+- src/presentation/modules/Social/social_pro/liveService.ts: 0
+- src/services/chatRoomsApi.ts: 0
+- src/services/mutationQueue.ts: 0
+
+Explicit mobile api.* endpoints were audited against routes/api.php after patch.
+Runtime DB/network/native publisher tests require the deployed environment and were not available in the supplied source archives.

@@ -1,0 +1,24 @@
+<?php
+
+namespace App\Services;
+
+use Illuminate\Support\Facades\Http;
+use RuntimeException;
+
+class FirebaseTokenVerifier
+{
+    public function verify(string $idToken): array
+    {
+        $apiKey=(string) config('services.firebase.api_key');
+        if ($apiKey==='') throw new RuntimeException('Firebase API key is not configured.');
+        $response=Http::asJson()->timeout(10)->post('https://identitytoolkit.googleapis.com/v1/accounts:lookup?key='.urlencode($apiKey), ['idToken'=>$idToken]);
+        if (! $response->successful() || ! is_array($response->json('users.0'))) throw new RuntimeException('Invalid Firebase token.');
+        $identity = $response->json('users.0');
+        // Only read claims after Google's lookup has validated this exact token.
+        $parts = explode('.', $idToken);
+        $claims = json_decode(base64_decode(strtr($parts[1] ?? '', '-_', '+/')), true) ?: [];
+        if (($claims['sub'] ?? '') !== ($identity['localId'] ?? '')) throw new RuntimeException('Firebase identity mismatch.');
+        $identity['verifiedSignInProvider'] = $claims['firebase']['sign_in_provider'] ?? '';
+        return $identity;
+    }
+}

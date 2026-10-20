@@ -1,0 +1,106 @@
+<?php
+
+namespace App\Http\Controllers\Api\V1;
+
+use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\V1\Concerns\ApiResponses;
+use App\Models\User;
+use App\Services\FirebaseTokenVerifier;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+
+class FirebaseExchangeController extends Controller
+{
+    use ApiResponses;
+
+    public function __invoke(Request $request, FirebaseTokenVerifier $verifier)
+    {
+        $data = $request->validate(['id_token' => 'required|string', 'device_name' => 'nullable|string|max:120']);
+        try {
+            $identity = $verifier->verify($data['id_token']);
+        } catch (\Throwable $e) {
+            return $this->failure('UNAUTHENTICATED', 'Firebase identity could not be verified.', 401);
+        }
+
+        $uid = (string) ($identity['localId'] ?? '');
+        if ($uid === '') return $this->failure('UNAUTHENTICATED', 'Firebase UID is missing.', 401);
+
+        $user = DB::transaction(function () use ($uid, $identity): User {
+            $user = User::where('legacy_firebase_uid', $uid)->orWhere('firebase_uid', $uid)->first();
+            if (! $user && ! empty($identity['email'])) {
+                $candidate = User::whereRaw('lower(email)=?', [strtolower((string) $identity['email'])])->first();
+                if ($candidate) {
+                    // An email match alone must never rebind another Firebase identity.
+                    abort_unless(($identity['emailVerified'] ?? false) === true
+                        && ! $candidate->firebase_uid && ! $candidate->legacy_firebase_uid, 403,
+                        'This email is already linked. Sign in with your existing account.');
+                    $user = $candidate;
+                }
+            }
+            if (! $user) {
+                $user = new User([
+                    'name' => $identity['displayName'] ?? 'Cèlè One user',
+                    'email' => $identity['email'] ?? $uid . '@migrated.celeone.local',
+                    'password' => Str::random(64),
+                ]);
+            }
+
+            abort_if($user->firebase_disabled || ($identity['disabled'] ?? false), 403, 'This account is disabled.');
+            // Once a Laravel password is set, an old Firebase password must not bypass it.
+            abort_if($user->password_migrated_at && ($identity['verifiedSignInProvider'] ?? '') !== 'google.com',
+                403, 'Please sign in with your current CeleOne password or Google.');
+            $role = $this->resolvedRole($user, $uid, $identity);
+            $user->forceFill([
+                'firebase_uid' => $uid,
+                'legacy_firebase_uid' => $uid,
+                'avatar_url' => $identity['photoUrl'] ?? $user->avatar_url,
+                'email_verified_at' => ($identity['emailVerified'] ?? false) ? now() : $user->email_verified_at,
+                'role' => $role,
+            ])->save();
+
+            // Keep the profile mirror aligned. Admin authorization is based on
+            // users.role, so an imported admin must not silently become `user`
+            // merely because the Firebase access token was exchanged again.
+            DB::table('user_data')->where(function ($query) use ($user, $uid): void {
+                $query->where('user_id', $user->id)->orWhere('firebase_uid', $uid);
+            })->update(['role' => $role, 'updated_at' => now()]);
+
+            return $user->fresh();
+        });
+
+        return $this->success([
+            'user' => $user,
+            'password_migrated' => (bool) $user->password_migrated_at,
+            'access_token' => $user->createToken($data['device_name'] ?? 'migrated-mobile')->plainTextToken,
+            'token_type' => 'Bearer',
+        ]);
+    }
+
+    private function resolvedRole(User $user, string $uid, array $identity): string
+    {
+        if ($user->exists) return in_array($user->role, ['admin','super_admin'], true) ? $user->role : 'user';
+        $candidates = [];
+
+        if (! empty($identity['customAttributes'])) {
+            $claims = is_array($identity['customAttributes']) ? $identity['customAttributes'] : (json_decode((string) $identity['customAttributes'], true) ?: []);
+            if (($claims['isSuperAdmin'] ?? false) === true) $candidates[] = 'super_admin';
+            if (($claims['isAdmin'] ?? false) === true || ($claims['admin'] ?? false) === true) $candidates[] = 'admin';
+            if (! empty($claims['role'])) $candidates[] = strtolower((string) $claims['role']);
+        }
+
+        $profileRole = DB::table('user_data')
+            ->where(function ($query) use ($user, $uid): void {
+                if ($user->exists) $query->where('user_id', $user->id)->orWhere('firebase_uid', $uid);
+                else $query->where('firebase_uid', $uid);
+            })
+            ->orderByDesc('id')
+            ->value('role');
+        if ($profileRole) $candidates[] = strtolower((string) $profileRole);
+        if ($user->role) $candidates[] = strtolower((string) $user->role);
+
+        if (in_array('super_admin', $candidates, true)) return 'super_admin';
+        if (in_array('admin', $candidates, true)) return 'admin';
+        return 'user';
+    }
+}

@@ -1,0 +1,37 @@
+<?php
+
+return [
+    'collections' => [
+        'academyCertificates'=>'academy_certificates','academyEnrollments'=>'academy_enrollments','academyExamAttempts'=>'academy_exam_attempts',
+        'admin_alerts'=>'admin_alerts','agenda_items'=>'agenda_items','app_config'=>'app_configs','blocked_users'=>'blocked_users',
+        'cantiques'=>'cantiques','channels'=>'channels','chat_invites'=>'chat_invites','churchHistory'=>'church_history',
+        'content_reach'=>'content_reach','creatorApplications'=>'creator_applications','creatorContentRequests'=>'creator_content_requests',
+        'creatorDrafts'=>'creator_drafts','creatorRightsRequests'=>'creator_rights_requests','creatorScheduledPosts'=>'creator_scheduled_posts',
+        'creatorVerificationRequests'=>'creator_verification_requests','creator_metrics'=>'creator_metrics','documents'=>'documents',
+        'followers'=>'followers','following'=>'following','friendRequests'=>'friend_requests','friend_requests'=>'friend_requests',
+        'friends'=>'friendships','friendships'=>'friendships','groups'=>'groups','interaction_events'=>'interaction_events',
+        'jeunesse_children'=>'youth_children','jeunesse_quiz_attempts'=>'youth_quiz_attempts','jeunesse_quizzes'=>'youth_quizzes',
+        'jeunesse_results'=>'youth_results','jeunesse_settings'=>'youth_settings','joinRequests'=>'join_requests',
+        'live_notification_subscriptions'=>'live_notification_subscriptions','media_consumption_events'=>'media_consumption_events',
+        'memberCardRequests'=>'member_card_requests','memberCards'=>'member_cards','monetizationRequests'=>'monetization_requests',
+        'music_albums'=>'music_albums','notification_dispatch_queue'=>'notification_dispatch_queue','notification_inbox'=>'notification_inbox',
+        'page_profile_views'=>'page_profile_views','parishHistory'=>'parish_history','parish_tracking_sessions'=>'parish_tracking_sessions',
+        'parish_visit_plans'=>'parish_visit_plans','parishes'=>'parishes','participationRewards'=>'participation_rewards',
+        'payment_config'=>'payment_configs','payment_transactions'=>'payment_transactions','platform_requests'=>'platform_requests',
+        'post_boost_campaigns'=>'post_boost_campaigns','profile_media'=>'profile_media','reels'=>'reels','reports'=>'reports',
+        'restriction_appeals'=>'restriction_appeals','shares'=>'shares','social_config'=>'social_configs',
+        'social_delivery_events'=>'social_delivery_events','social_fanout_jobs'=>'social_fanout_jobs','social_live_events'=>'social_live_events',
+        'social_live_sessions'=>'social_live_sessions','songs'=>'songs','status'=>'statuses','statusGroups'=>'statuses',
+        'subscription_packages'=>'subscription_packages','tvDevices'=>'tv_devices','tvLinkCodes'=>'tv_link_codes','userBadges'=>'user_badges',
+        'user_devices'=>'user_devices','user_feeds'=>'user_feed_items','user_interests'=>'user_interests','user_presence'=>'user_presence',
+        'user_profile_views'=>'user_profile_views','user_reactions'=>'user_reactions','user_subscriptions'=>'user_subscriptions',
+        'videos'=>'videos','watch_history'=>'watch_history','weekly_themes'=>'weekly_themes',
+    ],
+    'socket' => [
+        'issuer' => env('SOCKET_JWT_ISSUER', 'celeone-api'),
+        'audience' => env('SOCKET_JWT_AUDIENCE', 'celeone-socket'),
+        'secret' => env('SOCKET_JWT_SECRET'),
+        'ttl_seconds' => (int) env('SOCKET_JWT_TTL', 300),
+        'internal_secret' => env('SOCKET_INTERNAL_SECRET'),
+    ],
+];

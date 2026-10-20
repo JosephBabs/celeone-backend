@@ -1,0 +1,169 @@
+<?php
+
+namespace App\Http\Controllers\Api\V1;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+
+/** Publishes reviewed Creator Studio uploads into the public streaming catalog. */
+class CreatorContentModerationController extends Controller
+{
+    public function review(Request $request, string $id): JsonResponse
+    {
+        $input = $request->validate([
+            'decision' => ['required', 'in:approved,rejected'],
+            'notes' => ['nullable', 'string', 'max:2000'],
+        ]);
+
+        $result = DB::transaction(function () use ($request, $id, $input): array {
+            $row = DB::table('firebase_documents')
+                ->where('collection_path', 'creatorContentRequests')
+                ->where('document_id', $id)
+                ->lockForUpdate()
+                ->first();
+            abort_unless($row, 404, 'Creator submission not found.');
+
+            $submission = $this->payload($row->payload);
+            $decision = $input['decision'];
+            $oldCollection = trim((string) ($submission['publishedCollection'] ?? ''));
+            $oldContentId = trim((string) ($submission['publishedContentId'] ?? ''));
+            $userId = trim((string) ($submission['userId'] ?? $submission['ownerId'] ?? $submission['requesterId'] ?? ''));
+            $now = now()->toISOString();
+            $publishedCollection = null;
+            $publishedContentId = null;
+
+            if ($decision === 'approved') {
+                abort_unless(($submission['rightsConfirmed'] ?? false) === true, 422, 'Creator rights confirmation is required.');
+                abort_unless($userId !== '', 422, 'Creator account could not be resolved.');
+
+                $mediaType = strtolower(trim((string) ($submission['mediaType'] ?? $submission['contentType'] ?? '')));
+                $accountType = strtolower(trim((string) ($submission['accountType'] ?? '')));
+                $isSong = in_array($mediaType, ['song', 'music', 'audio'], true) || ($mediaType === '' && $accountType === 'music');
+                abort_unless($isSong || in_array($mediaType, ['video', 'film', 'movie'], true) || $accountType === 'video', 422, 'Unsupported Creator Studio media type.');
+
+                $publishedCollection = $isSong ? 'songs' : 'movies';
+                $publishedContentId = trim((string) ($submission['publishedContentId'] ?? '')) ?: $id;
+                if ($oldCollection && $oldContentId && ($oldCollection !== $publishedCollection || $oldContentId !== $publishedContentId)) {
+                    DB::table('firebase_documents')->where('collection_path', $oldCollection)->where('document_id', $oldContentId)->delete();
+                }
+
+                $profileRow = DB::table('firebase_documents')
+                    ->where('collection_path', 'user_data')
+                    ->where('document_id', $userId)
+                    ->first();
+                $profile = $profileRow ? $this->payload($profileRow->payload) : [];
+                $creatorName = trim((string) ($submission['artistName'] ?? $submission['creatorName'] ?? $profile['displayName'] ?? $profile['name'] ?? ''));
+                $creatorName = $creatorName !== '' ? $creatorName : 'CeleOne Creator';
+                $title = trim((string) ($submission['title'] ?? ''));
+                abort_unless($title !== '', 422, 'A title is required to publish this submission.');
+                $mediaUrl = trim((string) ($submission['mediaUrl'] ?? $submission['audioUrl'] ?? $submission['videoUrl'] ?? ''));
+                abort_unless($mediaUrl !== '', 422, 'Uploaded media URL is missing.');
+                $coverUrl = trim((string) ($submission['coverUrl'] ?? $submission['thumbnailUrl'] ?? $submission['imageUrl'] ?? ''));
+
+                $catalogItem = $isSong ? [
+                    'title' => $title,
+                    'artist' => $creatorName,
+                    'artistId' => $userId,
+                    'creatorId' => $userId,
+                    'ownerId' => $userId,
+                    'userId' => $userId,
+                    'genre' => (string) ($submission['genre'] ?? ''),
+                    'description' => (string) ($submission['description'] ?? ''),
+                    'albumId' => (string) ($submission['albumId'] ?? ''),
+                    'audioUrl' => $mediaUrl,
+                    'link' => $mediaUrl,
+                    'coverUrl' => $coverUrl,
+                    'mediaFormat' => 'audio',
+                    'type' => 'music',
+                    'status' => 'published',
+                    'createdAt' => $submission['createdAt'] ?? $now,
+                    'createdAtMs' => (int) ($submission['createdAtMs'] ?? now()->valueOf()),
+                    'publishedAt' => $now,
+                    'updatedAt' => $now,
+                    'moderationStatus' => 'approved',
+                    'source' => 'creator_studio',
+                    'creatorRequestId' => $id,
+                ] : [
+                    'title' => $title,
+                    'channelName' => $creatorName,
+                    'publisherName' => $creatorName,
+                    'authorName' => $creatorName,
+                    'creatorId' => $userId,
+                    'ownerId' => $userId,
+                    'userId' => $userId,
+                    'genre' => (string) ($submission['genre'] ?? ''),
+                    'description' => (string) ($submission['description'] ?? ''),
+                    'videoUrl' => $mediaUrl,
+                    'link' => $mediaUrl,
+                    'coverUrl' => $coverUrl,
+                    'type' => 'movie',
+                    'status' => 'published',
+                    'createdAt' => $submission['createdAt'] ?? $now,
+                    'createdAtMs' => (int) ($submission['createdAtMs'] ?? now()->valueOf()),
+                    'publishedAt' => $now,
+                    'updatedAt' => $now,
+                    'moderationStatus' => 'approved',
+                    'source' => 'creator_studio',
+                    'creatorRequestId' => $id,
+                    'mimeType' => (string) ($submission['mimeType'] ?? ''),
+                    'duration' => (string) ($submission['duration'] ?? ''),
+                ];
+
+                $existingCatalog = DB::table('firebase_documents')
+                    ->where('collection_path', $publishedCollection)
+                    ->where('document_id', $publishedContentId)
+                    ->first();
+                DB::table('firebase_documents')->updateOrInsert(
+                    ['collection_path' => $publishedCollection, 'document_id' => $publishedContentId],
+                    [
+                        'parent_document_path' => null,
+                        'payload' => json_encode($catalogItem, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                        'firebase_updated_at' => $now,
+                        'updated_at' => $now,
+                        'created_at' => $existingCatalog?->created_at ?? $now,
+                    ],
+                );
+            } elseif ($oldCollection && $oldContentId) {
+                DB::table('firebase_documents')->where('collection_path', $oldCollection)->where('document_id', $oldContentId)->delete();
+            }
+
+            $submission['status'] = $decision;
+            $submission['reviewStatus'] = $decision;
+            $submission['moderationStatus'] = $decision;
+            $submission['adminNotes'] = (string) ($input['notes'] ?? '');
+            $submission['reviewedAt'] = $now;
+            $submission['reviewedBy'] = (string) ($request->user()->firebase_uid ?: $request->user()->id);
+            $submission['updatedAt'] = $now;
+            $submission['updatedAtMs'] = now()->valueOf();
+            $submission['publishedCollection'] = $publishedCollection;
+            $submission['publishedContentId'] = $publishedContentId;
+            $submission['targetCollection'] = $publishedCollection;
+            $submission['targetId'] = $publishedContentId;
+
+            DB::table('firebase_documents')->where('id', $row->id)->update([
+                'payload' => json_encode($submission, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                'firebase_updated_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+            return [
+                'requestId' => $id,
+                'status' => $decision,
+                'collection' => $publishedCollection,
+                'contentId' => $publishedContentId,
+            ];
+        });
+
+        return response()->json(['data' => $result]);
+    }
+
+    private function payload(mixed $payload): array
+    {
+        if (is_array($payload)) return $payload;
+        if (is_object($payload)) return (array) $payload;
+        $decoded = json_decode((string) $payload, true);
+        return is_array($decoded) ? $decoded : [];
+    }
+}

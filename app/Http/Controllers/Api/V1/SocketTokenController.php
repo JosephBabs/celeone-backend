@@ -1,0 +1,5 @@
+<?php
+
+namespace App\Http\Controllers\Api\V1;
+use App\Http\Controllers\Controller;use App\Http\Controllers\Api\V1\Concerns\ApiResponses;use Illuminate\Http\Request;use RuntimeException;
+class SocketTokenController extends Controller{use ApiResponses;public function __invoke(Request $r){$secret=(string)config('celeone_domains.socket.secret');if($secret==='')throw new RuntimeException('SOCKET_JWT_SECRET is not configured.');$now=time();$payload=['iss'=>config('celeone_domains.socket.issuer'),'aud'=>config('celeone_domains.socket.audience'),'sub'=>(string)$r->user()->id,'role'=>$r->user()->role,'iat'=>$now,'exp'=>$now+config('celeone_domains.socket.ttl_seconds')];$h=['alg'=>'HS256','typ'=>'JWT'];$enc=fn($v)=>rtrim(strtr(base64_encode(json_encode($v,JSON_UNESCAPED_SLASHES)),'+/','-_'),'=');$head=$enc($h);$body=$enc($payload);$sig=rtrim(strtr(base64_encode(hash_hmac('sha256',$head.'.'.$body,$secret,true)),'+/','-_'),'=');return $this->success(['token'=>$head.'.'.$body.'.'.$sig,'expires_at'=>date(DATE_ATOM,$payload['exp']),'url'=>env('SOCKET_PUBLIC_URL','wss://app.celeonetv.com/socket')]);}}

@@ -1,0 +1,123 @@
+<?php
+
+namespace App\Providers;
+
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\ServiceProvider;
+
+class AppServiceProvider extends ServiceProvider
+{
+    /**
+     * Register any application services.
+     */
+    public function register(): void
+    {
+        //
+    }
+
+    /**
+     * Bootstrap any application services.
+     */
+    public function boot(): void
+    {
+        /*
+        |--------------------------------------------------------------------------
+        | General API
+        |--------------------------------------------------------------------------
+        |
+        | Authenticated users receive a higher allowance than anonymous users.
+        |
+        */
+
+        RateLimiter::for('api', function (Request $request) {
+            if ($request->user()) {
+                return Limit::perMinute(240)
+                    ->by('user:' . $request->user()->id);
+            }
+
+            return Limit::perMinute(60)
+                ->by('ip:' . $request->ip());
+        });
+
+        /*
+        |--------------------------------------------------------------------------
+        | Marketplace
+        |--------------------------------------------------------------------------
+        */
+
+        RateLimiter::for('marketplace', function (Request $request) {
+            return Limit::perMinute(180)
+                ->by(
+                    $request->user()
+                        ? 'marketplace:user:' . $request->user()->id
+                        : 'marketplace:ip:' . $request->ip()
+                );
+        });
+
+        /*
+        |--------------------------------------------------------------------------
+        | Social
+        |--------------------------------------------------------------------------
+        */
+
+        RateLimiter::for('social-actions', function (Request $request) {
+            return Limit::perMinute(240)
+                ->by(
+                    $request->user()
+                        ? 'social:user:' . $request->user()->id
+                        : 'social:ip:' . $request->ip()
+                );
+        });
+
+        /*
+        |--------------------------------------------------------------------------
+        | Uploads
+        |--------------------------------------------------------------------------
+        |
+        | Lower than normal API traffic because uploads are heavier.
+        |
+        */
+
+        RateLimiter::for('uploads', function (Request $request) {
+            return Limit::perMinute(30)
+                ->by(
+                    $request->user()
+                        ? 'upload:user:' . $request->user()->id
+                        : 'upload:ip:' . $request->ip()
+                );
+        });
+
+        /*
+        |--------------------------------------------------------------------------
+        | Admin
+        |--------------------------------------------------------------------------
+        */
+
+        RateLimiter::for('admin', function (Request $request) {
+            return Limit::perMinute(120)
+                ->by(
+                    $request->user()
+                        ? 'admin:user:' . $request->user()->id
+                        : 'admin:ip:' . $request->ip()
+                );
+        });
+
+        /*
+        |--------------------------------------------------------------------------
+        | Authentication / OTP / reset
+        |--------------------------------------------------------------------------
+        |
+        | Keep this strict to reduce abuse.
+        |
+        */
+
+        RateLimiter::for('auth-strict', function (Request $request) {
+            $email = strtolower(trim((string) $request->input('email', 'guest')));
+
+            return Limit::perMinute(8)
+                ->by('auth:' . $email . '|' . $request->ip());
+        });
+    }
+}

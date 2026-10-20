@@ -1,0 +1,9 @@
+[Unit]
+Description=CeleOne expired feed cursor and interaction cleanup
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=www-data
+WorkingDirectory=/var/www/celeone-backend
+ExecStart=/usr/bin/php artisan feed:prune

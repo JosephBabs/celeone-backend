@@ -1,0 +1,398 @@
+<?php
+
+namespace App\Http\Controllers\Api\V1;
+
+use App\Http\Controllers\Api\V1\Concerns\ApiResponses;
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Throwable;
+
+/** Authenticated, resumable uploads for approved Creator Studio accounts. */
+class CreatorChunkUploadController extends Controller
+{
+    use ApiResponses;
+
+    private const MAX_BYTES = 1258291200; // 1200 MiB, matching the mobile upload service.
+    private const MAX_CHUNK_BYTES = 4194304;
+    private const SESSION_TTL_HOURS = 24;
+    private const ALLOWED_MIME_PREFIXES = ['audio/', 'image/', 'video/'];
+
+    public function start(Request $request)
+    {
+        $data = $request->validate([
+            'file_name' => 'required|string|max:180',
+            'mime_type' => 'required|string|max:120',
+            'size_bytes' => 'required|integer|min:1|max:' . self::MAX_BYTES,
+            'purpose' => 'required|in:creator',
+        ]);
+
+        $this->assertApprovedCreator($request);
+        $mime = strtolower(trim($data['mime_type']));
+        abort_unless($this->isMediaMime($mime), 422, 'Creator uploads must be audio, image, or video media.');
+
+        $name = basename(str_replace('\\', '/', trim($data['file_name'])));
+        abort_if($name === '' || $name === '.' || $name === '..', 422, 'Invalid file name.');
+
+        $ownerId = (string) $request->user()->id;
+        $this->removeExpiredSessions($ownerId);
+        $activeCount = DB::table('upload_sessions')
+            ->where('user_id', $ownerId)
+            ->where('status', 'uploading')
+            ->where('updated_at', '>=', now()->subHours(self::SESSION_TTL_HOURS))
+            ->count();
+        abort_if($activeCount >= 2, 429, 'Finish or cancel an existing creator upload first.');
+
+        $id = (string) Str::ulid();
+        $root = $this->stagingRoot();
+        $chunkPath = $root . DIRECTORY_SEPARATOR . $id . '.part';
+        $lockPath = $root . DIRECTORY_SEPARATOR . $id . '.lock';
+        abort_unless(@file_put_contents($chunkPath, '') !== false, 500, 'Unable to initialize upload storage.');
+        @chmod($chunkPath, 0600);
+
+        $asset = [
+            'kind' => 'creator_chunk_upload',
+            'file_name' => $name,
+            'mime_type' => $mime,
+            'size_bytes' => (int) $data['size_bytes'],
+            'offset' => 0,
+            'chunk_path' => $chunkPath,
+            'lock_path' => $lockPath,
+        ];
+
+        try {
+            DB::table('upload_sessions')->insert([
+                'public_id' => $id,
+                'user_id' => $ownerId,
+                'status' => 'uploading',
+                'title' => $name,
+                'data' => json_encode($asset, JSON_THROW_ON_ERROR),
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        } catch (Throwable $error) {
+            @unlink($chunkPath);
+            throw $error;
+        }
+
+        return $this->success(['id' => $id, 'offset' => 0, 'chunk_size' => self::MAX_CHUNK_BYTES], 201);
+    }
+
+    public function append(Request $request, string $id)
+    {
+        $input = $request->validate([
+            'offset' => 'required|integer|min:0',
+            'data' => 'required|string|max:5592408',
+        ]);
+        $row = $this->ownedSession($request, $id);
+        $asset = $this->decodeAsset($row);
+        if ($row->status !== 'complete') $this->assertActive($row);
+        $bytes = base64_decode($input['data'], true);
+        abort_if($bytes === false || $bytes === '', 422, 'Upload chunk is empty or invalid.');
+        abort_if(strlen($bytes) > self::MAX_CHUNK_BYTES, 413, 'Upload chunk exceeds the allowed size.');
+
+        $lock = $this->acquireLock($asset);
+        try {
+            $row = $this->ownedSession($request, $id);
+            $asset = $this->decodeAsset($row);
+            $this->assertActive($row);
+            $offset = (int) $input['offset'];
+            $storedOffset = (int) ($asset['offset'] ?? 0);
+            $hash = hash('sha256', $bytes);
+
+            // A retry after a lost response is successful only for the exact prior chunk.
+            if ($offset < $storedOffset) {
+                $sameRetry = $offset === (int) ($asset['last_chunk_offset'] ?? -1)
+                    && strlen($bytes) === (int) ($asset['last_chunk_size'] ?? -1)
+                    && hash_equals((string) ($asset['last_chunk_sha256'] ?? ''), $hash);
+                abort_unless($sameRetry, 409, 'Upload offset does not match the server.');
+                return $this->success(['offset' => $storedOffset]);
+            }
+
+            abort_unless($offset === $storedOffset, 409, 'Upload offset does not match the server.');
+            abort_if($offset + strlen($bytes) > (int) $asset['size_bytes'], 413, 'Upload exceeds the declared file size.');
+
+            $path = (string) $asset['chunk_path'];
+            $stream = @fopen($path, 'c+b');
+            abort_unless($stream !== false, 500, 'Unable to access upload storage.');
+            try {
+                // Recover safely if the process stopped after writing but before saving offset.
+                if (!ftruncate($stream, $storedOffset) || fseek($stream, $storedOffset) !== 0) {
+                    abort(500, 'Unable to resume upload storage.');
+                }
+                $written = 0;
+                $length = strlen($bytes);
+                while ($written < $length) {
+                    $count = fwrite($stream, substr($bytes, $written, 65536));
+                    if ($count === false || $count === 0) abort(500, 'Unable to write upload chunk.');
+                    $written += $count;
+                }
+                fflush($stream);
+                if (function_exists('fsync')) @fsync($stream);
+            } finally {
+                fclose($stream);
+            }
+
+            $nextOffset = $offset + strlen($bytes);
+            $asset['offset'] = $nextOffset;
+            $asset['last_chunk_offset'] = $offset;
+            $asset['last_chunk_size'] = strlen($bytes);
+            $asset['last_chunk_sha256'] = $hash;
+            DB::table('upload_sessions')->where('id', $row->id)->update([
+                'data' => json_encode($asset, JSON_THROW_ON_ERROR),
+                'updated_at' => now(),
+            ]);
+
+            return $this->success(['offset' => $nextOffset]);
+        } finally {
+            $this->releaseLock($lock);
+        }
+    }
+
+    public function complete(Request $request, string $id)
+    {
+        $row = $this->ownedSession($request, $id);
+        $asset = $this->decodeAsset($row);
+        $this->assertActive($row);
+        $lock = $this->acquireLock($asset);
+        try {
+            $row = $this->ownedSession($request, $id);
+            $asset = $this->decodeAsset($row);
+            if ($row->status === 'complete') return $this->completedResult($id, $asset);
+            $this->assertActive($row);
+
+            $size = (int) ($asset['size_bytes'] ?? 0);
+            abort_unless((int) ($asset['offset'] ?? -1) === $size, 409, 'Upload is incomplete.');
+            $chunkPath = (string) ($asset['chunk_path'] ?? '');
+            abort_unless(is_file($chunkPath) && filesize($chunkPath) === $size, 422, 'Uploaded file size could not be verified.');
+
+            $sampleStream = fopen($chunkPath, 'rb');
+            abort_unless($sampleStream !== false, 500, 'Unable to verify completed media.');
+            try {
+                $header = fread($sampleStream, 1048576);
+            } finally {
+                fclose($sampleStream);
+            }
+            $detectedMime = $header === false ? '' : ((new \finfo(FILEINFO_MIME_TYPE))->buffer($header) ?: '');
+            $declaredMime = strtolower((string) ($asset['mime_type'] ?? ''));
+            abort_unless($this->isMediaMime($detectedMime) && $this->sameMediaFamily($declaredMime, $detectedMime), 422, 'Uploaded media type could not be verified.');
+
+            $extension = $this->extensionFor($detectedMime, (string) $asset['file_name']);
+            $uid = $this->firebaseUid($request);
+            $path = 'uploads/creator/' . $uid . '/' . now()->format('Y/m') . '/' . Str::uuid() . '.' . $extension;
+            $diskName = (string) config('chat_media.disk', config('filesystems.default', 'public'));
+            $disk = Storage::disk($diskName);
+            $stream = fopen($chunkPath, 'rb');
+            abort_unless($stream !== false, 500, 'Unable to read completed upload.');
+            try {
+                $stored = $disk->put($path, $stream, ['visibility' => 'public', 'ContentType' => $detectedMime]);
+            } finally {
+                fclose($stream);
+            }
+            abort_unless($stored, 500, 'Unable to store completed media.');
+
+            $url = $this->publicUrl($disk, $path);
+            $asset = array_merge($asset, [
+                'offset' => $size,
+                'path' => $path,
+                'url' => $url,
+                'mime_type' => $detectedMime,
+                'completed_at' => now()->toISOString(),
+            ]);
+            DB::table('upload_sessions')->where('id', $row->id)->update([
+                'status' => 'complete',
+                'data' => json_encode($asset, JSON_THROW_ON_ERROR),
+                'updated_at' => now(),
+            ]);
+            @unlink($chunkPath);
+
+            return $this->completedResult($id, $asset);
+        } finally {
+            $this->releaseLock($lock);
+        }
+    }
+
+    public function cancel(Request $request, string $id)
+    {
+        $row = $this->ownedSession($request, $id);
+        $asset = $this->decodeAsset($row);
+        $lock = $this->acquireLock($asset);
+        try {
+            $row = $this->ownedSession($request, $id);
+            $asset = $this->decodeAsset($row);
+            if (!empty($asset['path']) && $row->status === 'complete') {
+                $disk = Storage::disk((string) config('chat_media.disk', config('filesystems.default', 'public')));
+                $disk->delete((string) $asset['path']);
+            }
+            $this->removeStagedFile($asset);
+            DB::table('upload_sessions')->where('id', $row->id)->delete();
+            return $this->success(['deleted' => true]);
+        } finally {
+            $this->releaseLock($lock);
+        }
+    }
+
+    private function assertApprovedCreator(Request $request): void
+    {
+        $uid = $this->firebaseUid($request);
+        // Creator approvals are stored in the Laravel resource bridge's PostgreSQL
+        // table. Reading that same source avoids a stale Firebase/Laravel mismatch.
+        $profiles = DB::table('firebase_documents')
+            ->whereIn('collection_path', ['user_data', 'users'])
+            ->where('document_id', $uid)
+            ->get();
+        $profileData = $profiles->map(fn ($row) => $this->resourcePayload($row->payload))->all();
+        foreach ($profileData as $profile) {
+            if (in_array(strtolower((string) ($profile['creatorStatus'] ?? '')), ['rejected', 'revoked', 'suspended', 'disabled'], true)) {
+                abort(403, 'Creator Studio access has been disabled.');
+            }
+        }
+        foreach ($profileData as $profile) {
+            if (strtolower((string) ($profile['creatorStatus'] ?? '')) === 'approved' || ($profile['isCreator'] ?? false) === true) return;
+        }
+
+        $applications = DB::table('firebase_documents')->where('collection_path', 'creatorApplications')
+            ->where(function ($query) use ($uid) {
+                $query->whereRaw("payload->>'userId' = ?", [$uid])
+                    ->orWhereRaw("payload->>'ownerId' = ?", [$uid])
+                    ->orWhereRaw("payload->>'requesterId' = ?", [$uid]);
+            })->limit(50)->get();
+        foreach ($applications as $application) {
+            $data = $this->resourcePayload($application->payload);
+            if (strtolower((string) ($data['status'] ?? $data['reviewStatus'] ?? $data['moderationStatus'] ?? '')) === 'approved') return;
+        }
+
+        abort(403, 'An approved Creator Studio account is required.');
+    }
+
+    private function resourcePayload(mixed $payload): array
+    {
+        if (is_array($payload)) return $payload;
+        if (is_object($payload)) return (array) $payload;
+        $decoded = json_decode((string) $payload, true);
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    private function firebaseUid(Request $request): string
+    {
+        $uid = trim((string) ($request->user()->firebase_uid ?: $request->user()->legacy_firebase_uid));
+        abort_if($uid === '', 403, 'Firebase account link is required.');
+        return $uid;
+    }
+
+    private function ownedSession(Request $request, string $id): object
+    {
+        $row = DB::table('upload_sessions')->where('public_id', $id)
+            ->where('user_id', $request->user()->id)->first();
+        abort_unless($row, 404, 'Upload session not found.');
+        return $row;
+    }
+
+    private function decodeAsset(object $row): array
+    {
+        $asset = json_decode((string) $row->data, true) ?: [];
+        abort_unless(($asset['kind'] ?? null) === 'creator_chunk_upload', 404, 'Upload session not found.');
+        return $asset;
+    }
+
+    private function assertActive(object $row): void
+    {
+        abort_if($row->status !== 'uploading', 409, 'Upload session is no longer active.');
+        abort_if(now()->diffInHours($row->created_at) > self::SESSION_TTL_HOURS, 410, 'Upload session expired.');
+    }
+
+    private function stagingRoot(): string
+    {
+        $root = storage_path('app/private/creator-upload-chunks');
+        if (!is_dir($root) && !@mkdir($root, 0700, true) && !is_dir($root)) abort(500, 'Unable to initialize upload storage.');
+        @chmod($root, 0700);
+        return $root;
+    }
+
+    private function acquireLock(array $asset)
+    {
+        $lockPath = (string) ($asset['lock_path'] ?? '');
+        abort_unless(str_starts_with($lockPath, $this->stagingRoot() . DIRECTORY_SEPARATOR), 404, 'Upload session not found.');
+        $lock = @fopen($lockPath, 'c');
+        abort_unless($lock !== false, 500, 'Unable to lock upload session.');
+        if (!flock($lock, LOCK_EX)) {
+            fclose($lock);
+            abort(503, 'Upload session is busy.');
+        }
+        return $lock;
+    }
+
+    private function releaseLock($lock): void
+    {
+        if (is_resource($lock)) {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    private function removeExpiredSessions(string $ownerId): void
+    {
+        $expired = DB::table('upload_sessions')->where('user_id', $ownerId)
+            ->where('status', 'uploading')->where('updated_at', '<', now()->subHours(self::SESSION_TTL_HOURS))
+            ->limit(10)->get();
+        foreach ($expired as $row) {
+            $asset = json_decode((string) $row->data, true) ?: [];
+            if (($asset['kind'] ?? null) === 'creator_chunk_upload') $this->removeStagedFile($asset);
+            DB::table('upload_sessions')->where('id', $row->id)->delete();
+        }
+    }
+
+    private function removeStagedFile(array $asset): void
+    {
+        $root = $this->stagingRoot() . DIRECTORY_SEPARATOR;
+        foreach (['chunk_path', 'lock_path'] as $key) {
+            $path = (string) ($asset[$key] ?? '');
+            if ($path !== '' && str_starts_with($path, $root)) @unlink($path);
+        }
+    }
+
+    private function completedResult(string $id, array $asset)
+    {
+        return $this->success([
+            'id' => $id,
+            'url' => (string) ($asset['url'] ?? ''),
+            'path' => (string) ($asset['path'] ?? ''),
+            'size' => (int) ($asset['size_bytes'] ?? 0),
+            'mime' => (string) ($asset['mime_type'] ?? 'application/octet-stream'),
+        ]);
+    }
+
+    private function publicUrl($disk, string $path): string
+    {
+        $base = rtrim((string) config('chat_media.public_base_url', ''), '/');
+        return $base !== '' ? $base . '/' . ltrim($path, '/') : $disk->url($path);
+    }
+
+    private function isMediaMime(string $mime): bool
+    {
+        foreach (self::ALLOWED_MIME_PREFIXES as $prefix) if (str_starts_with($mime, $prefix)) return true;
+        return false;
+    }
+
+    private function sameMediaFamily(string $declared, string $detected): bool
+    {
+        $family = static fn (string $mime) => str_contains($mime, '/') ? explode('/', $mime, 2)[0] : '';
+        return $family($declared) === $family($detected) && in_array($family($detected), ['audio', 'image', 'video'], true);
+    }
+
+    private function extensionFor(string $mime, string $originalName): string
+    {
+        $known = [
+            'audio/aac' => 'aac', 'audio/flac' => 'flac', 'audio/mp4' => 'm4a', 'audio/mpeg' => 'mp3',
+            'audio/ogg' => 'ogg', 'audio/wav' => 'wav', 'audio/x-wav' => 'wav', 'audio/webm' => 'weba',
+            'image/gif' => 'gif', 'image/heic' => 'heic', 'image/heif' => 'heif', 'image/jpeg' => 'jpg',
+            'image/png' => 'png', 'image/webp' => 'webp', 'video/3gpp' => '3gp', 'video/mp4' => 'mp4',
+            'video/quicktime' => 'mov', 'video/webm' => 'webm', 'video/x-matroska' => 'mkv',
+        ];
+        if (isset($known[$mime])) return $known[$mime];
+        $extension = strtolower((string) pathinfo($originalName, PATHINFO_EXTENSION));
+        return preg_match('/^[a-z0-9]{1,8}$/', $extension) ? $extension : 'media';
+    }
+}

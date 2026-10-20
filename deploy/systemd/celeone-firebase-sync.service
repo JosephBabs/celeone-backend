@@ -1,0 +1,23 @@
+[Unit]
+Description=CeleOne Firebase legacy synchronization worker
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/celeone-backend
+Environment=FIREBASE_SYNC_SCRIPT=/var/www/celeone-backend/tools/firebase-targeted-sync.mjs
+Environment=FIREBASE_SYNC_FILE=/var/www/celeone-backend/storage/app/firebase-targeted.ndjson
+Environment=FIREBASE_AUTH_FILE=/var/www/celeone-backend/storage/app/firebase-auth.ndjson
+Environment=GOOGLE_APPLICATION_CREDENTIALS=/etc/celeone/firebase-service-account.json
+ExecStart=/usr/bin/php artisan firebase:sync-legacy --interval=60
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

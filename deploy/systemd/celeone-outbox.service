@@ -1,0 +1,13 @@
+[Unit]
+Description=CeleOne PostgreSQL outbox publisher
+After=network.target redis-server.service postgresql.service
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/var/www/celeone-backend
+EnvironmentFile=/var/www/celeone-backend/.env
+ExecStart=/usr/bin/php artisan celeone:outbox:publish
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
