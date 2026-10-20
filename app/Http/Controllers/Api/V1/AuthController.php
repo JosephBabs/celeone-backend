@@ -95,7 +95,7 @@ class AuthController extends Controller
     private function tokens(User $user, Request $request): array
     {
         if (!$user->password_migrated_at) {
-            $user->forceFill([ 
+            $user->forceFill([
                 'password_migrated_at' => now(),
             ])->save();
         }
@@ -142,28 +142,33 @@ class AuthController extends Controller
         $query = DB::table('user_data');
 
         if (Schema::hasColumn('user_data', 'user_id')) {
-            $query->where('user_id', $user->id);
+            $profile = (clone $query)
+                ->where('user_id', $user->id)
+                ->when(
+                    Schema::hasColumn('user_data', 'id'),
+                    fn($q) => $q->orderByDesc('id')
+                )
+                ->first();
 
-            if (
-                $user->firebase_uid &&
-                Schema::hasColumn('user_data', 'firebase_uid')
-            ) {
-                $query->orWhere('firebase_uid', $user->firebase_uid);
+            if ($profile) {
+                return $profile;
             }
-        } elseif (
+        }
+
+        if (
             $user->firebase_uid &&
             Schema::hasColumn('user_data', 'firebase_uid')
         ) {
-            $query->where('firebase_uid', $user->firebase_uid);
-        } else {
-            return null;
+            return $query
+                ->where('firebase_uid', $user->firebase_uid)
+                ->when(
+                    Schema::hasColumn('user_data', 'id'),
+                    fn($q) => $q->orderByDesc('id')
+                )
+                ->first();
         }
 
-        if (Schema::hasColumn('user_data', 'id')) {
-            $query->orderByDesc('id');
-        }
-
-        return $query->first();
+        return null;
     }
 
     /*
@@ -180,129 +185,180 @@ class AuthController extends Controller
      */
     public function updateProfile(Request $request)
     {
-        $user = $request->user_data();
+        $user = $request->user();
+
+        if (!$user) {
+            return response()->json([
+                'message' => 'Unauthenticated.',
+            ], 401);
+        }
+
+        if (!Schema::hasTable('user_data')) {
+            throw ValidationException::withMessages([
+                'profile' => ['The user_data table does not exist.'],
+            ]);
+        }
 
         $data = $request->validate([
-            'firstName' => 'sometimes|required|string|max:120',
-            'lastName' => 'sometimes|required|string|max:120',
+            'firstName'   => 'sometimes|required|string|max:120',
+            'lastName'    => 'sometimes|required|string|max:120',
             'displayName' => 'sometimes|required|string|max:240',
-            'parish' => 'sometimes|nullable|string|max:190',
-            'phone' => 'sometimes|nullable|string|max:30',
-            'email' => 'sometimes|required|email|max:190',
-            'photoURL' => 'sometimes|nullable|url|max:2048',
+            'parish'      => 'sometimes|nullable|string|max:190',
+            'phone'       => 'sometimes|nullable|string|max:30',
+            'email'       => 'sometimes|required|email|max:190',
+            'photoURL'    => 'sometimes|nullable|url|max:2048',
         ]);
+
+        if (empty($data)) {
+            throw ValidationException::withMessages([
+                'profile' => ['No profile fields were provided.'],
+            ]);
+        }
 
         if (isset($data['email'])) {
             $data['email'] = strtolower(trim($data['email']));
 
-            $exists = User::query()
-                ->whereRaw('lower(email) = ?', [$data['email']])
-                ->where('id', '<>', $user->id)
-                ->exists();
+            if (Schema::hasColumn('users', 'email')) {
+                $exists = User::query()
+                    ->whereRaw('LOWER(email) = ?', [$data['email']])
+                    ->where('id', '<>', $user->id)
+                    ->exists();
 
-            if ($exists) {
-                throw \Illuminate\Validation\ValidationException::withMessages([
-                    'email' => ['This email address is already in use.'],
-                ]);
+                if ($exists) {
+                    throw ValidationException::withMessages([
+                        'email' => ['This email address is already in use.'],
+                    ]);
+                }
             }
         }
 
-        /*
-     * Map the published app's field names to common Laravel/PostgreSQL
-     * and legacy Firebase-imported profile column names.
-     *
-     * Only columns that actually exist will be written.
-     */
+        // Published app field => possible columns in user_data.
         $mapping = [
-            'firstName' => [
-                ['users', ['firstName', 'first_name']],
-                ['user_data', ['firstName', 'first_name']],
-            ],
-            'lastName' => [
-                ['users', ['lastName', 'last_name']],
-                ['user_data', ['lastName', 'last_name']],
-            ],
-            'displayName' => [
-                ['users', ['displayName', 'display_name', 'name']],
-                ['user_data', ['displayName', 'display_name']],
-            ],
-            'parish' => [
-                ['users', ['parish']],
-                ['user_data', ['parish']],
-            ],
-            'phone' => [
-                ['users', ['phone', 'phone_number']],
-                ['user_data', ['phone', 'phone_number']],
-            ],
-            'email' => [
-                ['users', ['email']],
-                ['user_data', ['email']],
-            ],
+            'firstName' => ['firstName', 'first_name'],
+            'lastName' => ['lastName', 'last_name'],
+            'displayName' => ['displayName', 'display_name'],
+            'parish' => ['parish'],
+            'phone' => ['phone', 'phone_number'],
+            'email' => ['email'],
             'photoURL' => [
-                ['users', ['photoURL', 'photo_url', 'avatar_url', 'avatar']],
-                ['user_data', ['photoURL', 'photo_url', 'avatar_url', 'avatar']],
+                'photoURL',
+                'photo_url',
+                'avatar_url',
+                'avatar',
             ],
         ];
 
-        $userUpdates = [];
         $profileUpdates = [];
         $unmapped = [];
 
         foreach ($data as $field => $value) {
-            $destination = null;
+            $columnFound = false;
 
-            foreach ($mapping[$field] ?? [] as [$table, $columns]) {
-                foreach ($columns as $column) {
-                    if (
-                        \Illuminate\Support\Facades\Schema::hasTable($table) &&
-                        \Illuminate\Support\Facades\Schema::hasColumn($table, $column)
-                    ) {
-                        $destination = [$table, $column];
-                        break 2;
-                    }
+            foreach ($mapping[$field] ?? [] as $column) {
+                if (Schema::hasColumn('user_data', $column)) {
+                    $profileUpdates[$column] = $value;
+                    $columnFound = true;
+                    break;
                 }
             }
 
-            if (!$destination) {
+            if (!$columnFound) {
                 $unmapped[] = $field;
-                continue;
-            }
-
-            [$table, $column] = $destination;
-
-            if ($table === 'users') {
-                $userUpdates[$column] = $value;
-            } else {
-                $profileUpdates[$column] = $value;
             }
         }
 
         if ($unmapped) {
-            throw \Illuminate\Validation\ValidationException::withMessages([
+            throw ValidationException::withMessages([
                 'profile' => [
-                    'These profile fields are not configured in the database: '
+                    'Missing user_data column mapping for: '
                         . implode(', ', $unmapped),
                 ],
             ]);
         }
 
-        \Illuminate\Support\Facades\DB::transaction(function () use (
+        DB::transaction(function () use (
             $user,
-            $userUpdates,
-            $profileUpdates
+            $profileUpdates,
+            $data
         ) {
-            if ($userUpdates) {
-                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'updated_at')) {
+            $profile = $this->profileData($user);
+
+            if ($profile) {
+                $query = DB::table('user_data');
+
+                if (
+                    isset($profile->user_id) &&
+                    (string) $profile->user_id === (string) $user->id
+                ) {
+                    $query->where('user_id', $user->id);
+                } elseif (
+                    isset($profile->firebase_uid) &&
+                    $user->firebase_uid &&
+                    $profile->firebase_uid === $user->firebase_uid
+                ) {
+                    $query->where('firebase_uid', $user->firebase_uid);
+                } elseif (isset($profile->id)) {
+                    $query->where('id', $profile->id);
+                } else {
+                    throw new \RuntimeException(
+                        'Cannot safely identify the user_data profile row.'
+                    );
+                }
+
+                if (Schema::hasColumn('user_data', 'updated_at')) {
+                    $profileUpdates['updated_at'] = now();
+                }
+
+                $query->update($profileUpdates);
+            } else {
+                // Create a row only when its identity can be established.
+                $insert = $profileUpdates;
+
+                if (Schema::hasColumn('user_data', 'user_id')) {
+                    $insert['user_id'] = $user->id;
+                } elseif (
+                    Schema::hasColumn('user_data', 'firebase_uid') &&
+                    $user->firebase_uid
+                ) {
+                    $insert['firebase_uid'] = $user->firebase_uid;
+                } else {
+                    throw new \RuntimeException(
+                        'Cannot identify a user_data row for this user.'
+                    );
+                }
+
+                if (
+                    Schema::hasColumn('user_data', 'firebase_uid') &&
+                    $user->firebase_uid
+                ) {
+                    $insert['firebase_uid'] = $user->firebase_uid;
+                }
+
+                if (Schema::hasColumn('user_data', 'created_at')) {
+                    $insert['created_at'] = now();
+                }
+
+                if (Schema::hasColumn('user_data', 'updated_at')) {
+                    $insert['updated_at'] = now();
+                }
+
+                DB::table('user_data')->insert($insert);
+            }
+
+            // Keep Laravel's authentication email synchronized.
+            if (
+                array_key_exists('email', $data) &&
+                Schema::hasColumn('users', 'email')
+            ) {
+                $userUpdates = ['email' => $data['email']];
+
+                if (Schema::hasColumn('users', 'updated_at')) {
                     $userUpdates['updated_at'] = now();
                 }
 
-                \Illuminate\Support\Facades\DB::table('users')
+                DB::table('users')
                     ->where('id', $user->id)
                     ->update($userUpdates);
-            }
-
-            if ($profileUpdates) {
-                $this->updateUserDataRow($user, $profileUpdates);
             }
         });
 
@@ -311,7 +367,7 @@ class AuthController extends Controller
         return $this->success([
             'message' => 'Profile updated successfully.',
             'user' => $user,
-            'user_data' => $this->getUserData($user),
+            'user_data' => $this->profileData($user),
         ]);
     }
 
