@@ -199,6 +199,8 @@ class AuthController extends Controller
      * Updates the same user_data record used by profileData().
      * Compatible with the published Cèlè One app.
      */
+    
+
     public function updateProfile(Request $request)
     {
         $user = $request->user();
@@ -213,7 +215,7 @@ class AuthController extends Controller
             'photoURL'    => 'sometimes|nullable|url|max:2048',
         ]);
 
-        if (empty($data)) {
+        if (!$data) {
             throw \Illuminate\Validation\ValidationException::withMessages([
                 'profile' => ['No profile fields were provided.'],
             ]);
@@ -222,7 +224,6 @@ class AuthController extends Controller
         if (isset($data['email'])) {
             $data['email'] = strtolower(trim($data['email']));
 
-            // Check the account email for another user.
             $exists = User::query()
                 ->whereRaw('LOWER(email) = ?', [$data['email']])
                 ->where('id', '<>', $user->id)
@@ -235,101 +236,127 @@ class AuthController extends Controller
             }
         }
 
-        // API field => actual possible columns in user_data.
-        $mapping = [
-            'firstName'   => ['firstName', 'first_name'],
-            'lastName'    => ['lastName', 'last_name'],
-            'displayName' => ['displayName', 'display_name'],
-            'parish'      => ['parish'],
-            'phone'       => ['phone', 'phone_number'],
-            'email'       => ['email'],
-            'photoURL'    => ['photoURL', 'photo_url', 'avatar_url', 'avatar'],
+        $schema = \Illuminate\Support\Facades\Schema::class;
+        $db = \Illuminate\Support\Facades\DB::class;
+
+        $profile = $this->profileData($user);
+
+        if (!$profile) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'profile' => ['No profile record was found in user_data.'],
+            ]);
+        }
+
+        $directColumns = [
+            'displayName' => 'display_name',
+            'phone'       => 'phone_number',
+            'photoURL'    => 'avatar_url',
         ];
 
-        if (!\Illuminate\Support\Facades\Schema::hasTable('user_data')) {
-            throw \Illuminate\Validation\ValidationException::withMessages([
-                'profile' => ['The user_data table does not exist.'],
-            ]);
-        }
+        $db::transaction(function () use (
+            $user,
+            $profile,
+            $data,
+            $directColumns,
+            $schema,
+            $db
+        ) {
+            $query = $db::table('user_data');
 
-        $columns = \Illuminate\Support\Facades\Schema::getColumnListing('user_data');
-        $updates = [];
-        $unmapped = [];
-
-        foreach ($data as $field => $value) {
-            $column = null;
-
-            foreach ($mapping[$field] ?? [] as $candidate) {
-                if (in_array($candidate, $columns, true)) {
-                    $column = $candidate;
-                    break;
-                }
-            }
-
-            if ($column === null) {
-                $unmapped[] = $field;
-                continue;
-            }
-
-            $updates[$column] = $value;
-        }
-
-        if ($unmapped) {
-            throw \Illuminate\Validation\ValidationException::withMessages([
-                'profile' => [
-                    'No matching user_data column exists for: '
-                        . implode(', ', $unmapped),
-                ],
-            ]);
-        }
-
-        \Illuminate\Support\Facades\DB::transaction(function () use ($user, $updates) {
-            $profile = $this->profileData($user);
-
-            if (!$profile) {
-                throw \Illuminate\Validation\ValidationException::withMessages([
-                    'profile' => ['No user_data profile was found for this account.'],
-                ]);
-            }
-
-            $query = \Illuminate\Support\Facades\DB::table('user_data');
-
-            // Update the exact record returned by profileData().
-            if (
-                \Illuminate\Support\Facades\Schema::hasColumn('user_data', 'id')
-                && isset($profile->id)
-            ) {
+            // Target the exact record fetched by profileData().
+            if (isset($profile->id)) {
                 $query->where('id', $profile->id);
-            } elseif (
-                \Illuminate\Support\Facades\Schema::hasColumn('user_data', 'user_id')
-                && isset($profile->user_id)
-            ) {
-                $query->where('user_id', $profile->user_id);
-            } elseif (
-                \Illuminate\Support\Facades\Schema::hasColumn('user_data', 'firebase_uid')
-                && isset($profile->firebase_uid)
-            ) {
-                $query->where('firebase_uid', $profile->firebase_uid);
             } else {
                 throw new \RuntimeException(
-                    'Cannot uniquely identify the user_data profile record.'
+                    'Cannot uniquely identify the user_data record.'
                 );
             }
 
-            if (in_array('updated_at', \Illuminate\Support\Facades\Schema::getColumnListing('user_data'), true)) {
+            // Read the JSONB payload and preserve unrelated fields.
+            $currentJson = $profile->profile_data ?? [];
+
+            if (is_string($currentJson)) {
+                $currentJson = json_decode($currentJson, true);
+            }
+
+            if (!is_array($currentJson)) {
+                $currentJson = [];
+            }
+
+            $jsonUpdates = [];
+            $updates = [];
+            foreach ($data as $field => $value) {
+                // Preserve the exact camelCase keys used by the app.
+                $jsonUpdates[$field] = $value;
+
+                // Update dedicated columns when available.
+                $column = $directColumns[$field] ?? null;
+
+                if (
+                    $column &&
+                    \Illuminate\Support\Facades\Schema::hasColumn(
+                        'user_data',
+                        $column
+                    )
+                ) {
+                    // Keep NULL values when the app explicitly clears a field.
+                    $updates[$column] = $value;
+                }
+            }
+
+            $mergedJson = array_replace($currentJson, $jsonUpdates);
+
+            $updates['profile_data'] = json_encode(
+                $mergedJson,
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+            );
+
+            if (
+                \Illuminate\Support\Facades\Schema::hasColumn(
+                    'user_data',
+                    'updated_at'
+                )
+            ) {
                 $updates['updated_at'] = now();
             }
 
-            $query->update($updates);
+            $affected = $query->update($updates);
+
+            if ($affected !== 1) {
+                throw new \RuntimeException(
+                    'Expected to update exactly one user_data record.'
+                );
+            }
+
+            // Keep the account email in sync when the users table owns it.
+            if (
+                array_key_exists('email', $data) &&
+                \Illuminate\Support\Facades\Schema::hasColumn('users', 'email')
+            ) {
+                $userUpdates = ['email' => $data['email']];
+
+                if (
+                    \Illuminate\Support\Facades\Schema::hasColumn(
+                        'users',
+                        'updated_at'
+                    )
+                ) {
+                    $userUpdates['updated_at'] = now();
+                }
+
+                $db::table('users')
+                    ->where('id', $user->id)
+                    ->update($userUpdates);
+            }
         });
 
-        // Return the same structure expected by the published app.
         return $this->success([
             'message' => 'Profile updated successfully.',
             'user' => $user->fresh(),
             'user_data' => $this->profileData($user),
         ]);
     }
+
 
 
     /**
