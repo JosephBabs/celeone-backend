@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\DB;
 
 class BackfillCreatorVideos extends Command
 {
-    protected $signature = 'creator:backfill-videos {--dry-run : Show how many movie documents would be copied without writing changes}';
+    protected $signature = 'creator:backfill-videos {--dry-run : Show the reconciliation plan without writing changes}';
 
     protected $description = 'Copy legacy movie catalog documents to videos while preserving existing video metrics.';
 
@@ -21,6 +21,7 @@ class BackfillCreatorVideos extends Command
         $copied = 0;
         $merged = 0;
         $skipped = 0;
+        $removedLegacy = 0;
 
         foreach ($movies as $movie) {
             $source = $this->payload($movie->payload);
@@ -35,22 +36,31 @@ class BackfillCreatorVideos extends Command
                 $relational = DB::table('videos')->where('public_id', $movie->document_id)->exists();
                 if ($mergedPayload === $target && $relational) {
                     $skipped++;
-                    continue;
+                } else {
+                    $merged++;
                 }
 
-                $merged++;
                 if (! $this->option('dry-run')) {
                     DB::transaction(function () use ($video, $movie, $mergedPayload): void {
-                        $now = now();
-                        DB::table('firebase_documents')->where('id', $video->id)->update([
-                            'payload' => json_encode($mergedPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-                            'firebase_updated_at' => $now,
-                            'updated_at' => $now,
-                        ]);
+                        if ($mergedPayload !== $this->payload($video->payload)) {
+                            $now = now();
+                            DB::table('firebase_documents')->where('id', $video->id)->update([
+                                'payload' => json_encode($mergedPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                                'firebase_updated_at' => $now,
+                                'updated_at' => $now,
+                            ]);
+                        } else {
+                            $now = now();
+                        }
                         $this->syncRelationalVideo($movie, $mergedPayload, $now);
+                        DB::table('firebase_documents')
+                            ->where('collection_path', 'movies')
+                            ->where('document_id', $movie->document_id)
+                            ->delete();
                     }, 3);
                 }
 
+                $removedLegacy++;
                 continue;
             }
 
@@ -89,12 +99,17 @@ class BackfillCreatorVideos extends Command
                     }
 
                     $this->syncRelationalVideo($movie, $payload, $now);
+                    DB::table('firebase_documents')
+                        ->where('collection_path', 'movies')
+                        ->where('document_id', $movie->document_id)
+                        ->delete();
                 }, 3);
             }
+            $removedLegacy++;
         }
 
-        $action = $this->option('dry-run') ? 'Would copy/merge' : 'Copied/merged';
-        $this->info("{$action}: {$copied} new videos, {$merged} merged with existing videos, {$skipped} already present without missing fields.");
+        $action = $this->option('dry-run') ? 'Would reconcile' : 'Reconciled';
+        $this->info("{$action}: {$copied} new videos, {$merged} merged with existing videos, {$skipped} already present, {$removedLegacy} legacy movie duplicates removed.");
 
         return self::SUCCESS;
     }
@@ -143,19 +158,35 @@ class BackfillCreatorVideos extends Command
 
     private function syncRelationalVideo(object $movie, array $payload, mixed $now): void
     {
-        $values = [
+        $existing = DB::table('videos')->where('public_id', $movie->document_id)->first();
+        $incoming = [
             'user_id' => $this->ownerId($payload),
             'status' => (string) ($payload['status'] ?? 'published'),
             'title' => (string) ($payload['title'] ?? ''),
             'body' => (string) ($payload['description'] ?? ''),
             'data' => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-            'updated_at' => $now,
         ];
 
-        DB::table('videos')->insertOrIgnore($values + [
+        if ($existing) {
+            $values = [];
+            foreach ($incoming as $key => $value) {
+                $current = $existing->{$key} ?? null;
+                if ($current === null || $current === '' || $current === '[]' || $current === '{}') {
+                    $values[$key] = $value;
+                }
+            }
+            if ($values !== []) {
+                $values['updated_at'] = $now;
+                DB::table('videos')->where('id', $existing->id)->update($values);
+            }
+
+            return;
+        }
+
+        DB::table('videos')->insertOrIgnore($incoming + [
             'public_id' => $movie->document_id,
             'created_at' => $movie->created_at ?? $now,
+            'updated_at' => $now,
         ]);
-        DB::table('videos')->where('public_id', $movie->document_id)->update($values);
     }
 }
