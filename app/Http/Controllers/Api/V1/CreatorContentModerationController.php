@@ -144,6 +144,12 @@ class CreatorContentModerationController extends Controller
                         'created_at' => $existingCatalog?->created_at ?? $now,
                     ],
                 );
+                if ($publishedCollection === 'videos') {
+                    DB::table('firebase_documents')
+                        ->where('collection_path', 'movies')
+                        ->where('document_id', $publishedContentId)
+                        ->delete();
+                }
             } elseif ($oldCollection && $oldContentId) {
                 DB::table('firebase_documents')->where('collection_path', $oldCollection)->where('document_id', $oldContentId)->delete();
             }
