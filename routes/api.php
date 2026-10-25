@@ -47,6 +47,8 @@ use App\Http\Controllers\Api\V1\ProfessionalTicketController;
 use App\Http\Controllers\Api\V1\ProfilePrivacyController;
 use App\Http\Controllers\Api\V1\PublicContentIndexController;
 use App\Http\Controllers\Api\V1\PublicMediaController;
+use App\Http\Controllers\Api\V1\PublicChannelIndexController;
+use App\Http\Controllers\Api\V1\PublicPostIndexController;
 use App\Http\Controllers\Api\V1\PublicPostController;
 use App\Http\Controllers\Api\V1\PublicReelController;
 use App\Http\Controllers\Api\V1\QuizAttemptController;
@@ -93,6 +95,9 @@ Route::prefix('v1')->middleware(AssignRequestId::class)->group(function (): void
     Route::get('public/posts/{id}', PublicPostController::class)->middleware('throttle:120,1');
     Route::get('public/reels/{id}', PublicReelController::class)->middleware('throttle:120,1');
     Route::get('public/media/{type}/{id}', PublicMediaController::class)->whereIn('type', ['videos', 'movies', 'songs'])->middleware('throttle:120,1');
+    Route::get('public/media/{type}', [PublicMediaController::class, 'index'])->whereIn('type', ['videos', 'songs'])->middleware('throttle:60,1');
+    Route::get('public/channels', PublicChannelIndexController::class)->middleware('throttle:60,1');
+    Route::get('public/posts', PublicPostIndexController::class)->middleware('throttle:60,1');
     Route::get('public/content-index', PublicContentIndexController::class)->middleware('throttle:30,1');
     Route::post('internal/subscriptions/confirmed', [SubscriptionController::class, 'confirmed']);
     Route::post('internal/social-live/{action}', [SocialLiveController::class, 'callback'])->where('action', 'publish|done');

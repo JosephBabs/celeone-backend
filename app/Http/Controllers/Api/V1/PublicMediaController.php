@@ -6,6 +6,32 @@ use Illuminate\Support\Facades\DB;
 
 class PublicMediaController
 {
+    public function index(\Illuminate\Http\Request $request, string $type)
+    {
+        $collection = $type === 'songs' ? 'songs' : 'videos';
+        $limit = max(1, min(100, $request->integer('limit', 20)));
+        $query = DB::table('firebase_documents')->where('collection_path', $collection);
+        if ($request->filled('cursor')) {
+            $query->where('id', '>', (int) $request->input('cursor'));
+        }
+
+        $items = [];
+        foreach ($query->orderBy('id')->limit($limit)->get(['document_id', 'payload', 'id']) as $row) {
+            $payload = json_decode((string) $row->payload, true);
+            if (! is_array($payload) || ! in_array(strtolower((string) ($payload['status'] ?? 'published')), ['published', 'active', 'approved'], true)) {
+                continue;
+            }
+            if (in_array(strtolower((string) ($payload['moderationStatus'] ?? '')), ['rejected', 'blocked', 'removed'], true)) {
+                continue;
+            }
+            $payload['id'] = $row->document_id;
+            $items[] = $payload;
+        }
+
+        return response()->json(['data' => $items, 'meta' => ['next_cursor' => $items ? (string) $row->id : null]])
+            ->header('Cache-Control', 'public, max-age=30');
+    }
+
     public function __invoke(string $type, string $id)
     {
         abort_if(strlen($id) > 191, 404);
