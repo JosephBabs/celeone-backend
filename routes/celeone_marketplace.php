@@ -23,10 +23,13 @@ Route::prefix('v1/marketplace')->group(function () {
     Route::get('/feed', [CatalogController::class, 'feed']);
     Route::get('/shops/{shop}', [CatalogController::class, 'shop']);
     Route::get('/shops/{shop}/listings', [CatalogController::class, 'shopListings']);
+    Route::get('/listings/{listing}', [CatalogController::class, 'listing']);
+    Route::get('/public/professional-profiles/{profile}', [ProfessionalController::class, 'publicShare']);
 
     // Public career feed; approved/active offers only.
     Route::get('/jobs', [JobController::class, 'feed']);
     Route::get('/jobs/{job}', [JobController::class, 'show']);
+    Route::post('/jobs/{job}/guest-applications', [JobController::class, 'applyGuest'])->middleware('throttle:5,1');
 
     Route::middleware(['auth:sanctum', 'throttle:marketplace'])->group(function () {
         Route::get('/recommendations', [CatalogController::class, 'recommendations']);

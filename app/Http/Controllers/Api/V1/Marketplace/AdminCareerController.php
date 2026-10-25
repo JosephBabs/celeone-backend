@@ -53,7 +53,7 @@ class AdminCareerController extends Controller
                     'rejectionReason' => $x->rejection_reason,
                 ]);
         } else {
-            $rows = DB::table('marketplace_job_applications as a')
+            $registered = DB::table('marketplace_job_applications as a')
                 ->join('marketplace_job_offers as j', 'j.id', '=', 'a.job_offer_id')
                 ->join('users as u', 'u.id', '=', 'a.user_id')
                 ->where('j.managed_by_celeone', true)
@@ -85,6 +85,33 @@ class AdminCareerController extends Controller
                         : null,
                     'createdAt' => $x->created_at,
                 ]);
+
+            $guest = DB::table('marketplace_public_job_applications as a')
+                ->join('marketplace_job_offers as j', 'j.id', '=', 'a.job_offer_id')
+                ->where('j.managed_by_celeone', true)
+                ->whereIn('a.status', match ($request->input('status', 'pending_review')) {
+                    'approved' => ['shortlisted', 'accepted'],
+                    'rejected' => ['rejected', 'closed'],
+                    default => ['interested', 'screening', 'contacted'],
+                })
+                ->orderByDesc('a.created_at')
+                ->limit(100)
+                ->get(['a.public_id','a.applicant_name','a.applicant_email','a.applicant_phone','a.message','a.status','a.created_at','j.public_id as job_public_id','j.title as job_title'])
+                ->map(fn ($x) => [
+                    'id' => $x->public_id,
+                    'jobId' => $x->job_public_id,
+                    'jobTitle' => $x->job_title,
+                    'candidateName' => $x->applicant_name,
+                    'candidateEmail' => $x->applicant_email,
+                    'candidatePhone' => $x->applicant_phone,
+                    'message' => $x->message,
+                    'status' => $x->status,
+                    'cvDocumentId' => null,
+                    'cvUrl' => null,
+                    'createdAt' => $x->created_at,
+                ]);
+
+            $rows = $registered->concat($guest)->sortByDesc('createdAt')->take(100)->values();
         }
 
         return response()->json(['data' => $rows->values()]);
@@ -198,7 +225,19 @@ class AdminCareerController extends Controller
         ]);
 
         $row = DB::table('marketplace_job_applications')->where('public_id', $application)->first();
-        abort_unless($row, 404);
+        if (!$row) {
+            $guest = DB::table('marketplace_public_job_applications')->where('public_id', $application)->first();
+            abort_unless($guest, 404);
+            DB::table('marketplace_public_job_applications')->where('id', $guest->id)->update([
+                'status' => $data['status'],
+                'contact_unlocked' => (bool) ($data['contactUnlocked'] ?? $guest->contact_unlocked),
+                'admin_note' => $data['note'] ?? null,
+                'handled_by' => $request->user()->id,
+                'updated_at' => now(),
+            ]);
+
+            return response()->json(['data' => ['id' => $application, 'status' => $data['status']]]);
+        }
 
         DB::table('marketplace_job_applications')->where('id', $row->id)->update([
             'status' => $data['status'],

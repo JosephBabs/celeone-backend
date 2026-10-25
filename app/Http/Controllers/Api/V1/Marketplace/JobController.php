@@ -241,6 +241,54 @@ class JobController extends Controller
         ]], $existing ? 200 : 201);
     }
 
+    public function applyGuest(Request $request, string $job)
+    {
+        $offer = DB::table('marketplace_job_offers')->where('public_id', $job)->first();
+        abort_unless(
+            $offer && $offer->status === 'approved' && $offer->available &&
+            (!$offer->deadline_at || \Illuminate\Support\Carbon::parse($offer->deadline_at)->isFuture()),
+            404
+        );
+
+        $data = $request->validate([
+            'applicantName' => 'required|string|min:2|max:150',
+            'applicantEmail' => 'required|email|max:255',
+            'applicantPhone' => 'required|string|min:5|max:64',
+            'message' => 'required|string|min:10|max:6000',
+        ]);
+        $email = strtolower(trim($data['applicantEmail']));
+        $existing = DB::table('marketplace_public_job_applications')
+            ->where('job_offer_id', $offer->id)
+            ->where('applicant_email', $email)
+            ->first();
+        $values = [
+            'applicant_name' => trim($data['applicantName']),
+            'applicant_email' => $email,
+            'applicant_phone' => trim($data['applicantPhone']),
+            'message' => trim($data['message']),
+            'status' => 'interested',
+            'updated_at' => now(),
+        ];
+
+        if ($existing) {
+            DB::table('marketplace_public_job_applications')->where('id', $existing->id)->update($values);
+            $id = $existing->public_id;
+        } else {
+            $id = (string) Str::uuid();
+            DB::table('marketplace_public_job_applications')->insert($values + [
+                'public_id' => $id,
+                'job_offer_id' => $offer->id,
+                'created_at' => now(),
+            ]);
+        }
+
+        return response()->json(['data' => [
+            'id' => $id,
+            'jobId' => $offer->public_id,
+            'status' => 'interested',
+        ]], $existing ? 200 : 201);
+    }
+
     public function myApplications(Request $request)
     {
         $rows = DB::table('marketplace_job_applications as a')
@@ -325,6 +373,35 @@ class JobController extends Controller
                     'createdAt' => $x->created_at,
                 ];
             });
+
+        $guestRows = DB::table('marketplace_public_job_applications')
+            ->where('job_offer_id', $offer->id)
+            ->orderByDesc('created_at')
+            ->get()
+            ->map(fn ($x) => [
+                'id' => $x->public_id,
+                'profileId' => null,
+                'name' => $x->applicant_name,
+                'headline' => null,
+                'profileVerified' => false,
+                'city' => null,
+                'country' => null,
+                'portfolioUrl' => null,
+                'skills' => [],
+                'message' => $x->message,
+                'status' => $x->status,
+                'cvDocumentId' => null,
+                'cvUrl' => null,
+                'contact' => $offer->managed_by_celeone ? null : [
+                    'phone' => $x->applicant_phone,
+                    'whatsapp' => null,
+                    'email' => $x->applicant_email,
+                ],
+                'managedByCeleOne' => (bool) $offer->managed_by_celeone,
+                'createdAt' => $x->created_at,
+            ]);
+
+        $rows = $rows->concat($guestRows)->sortByDesc('createdAt')->values();
 
         return response()->json(['data' => $rows]);
     }

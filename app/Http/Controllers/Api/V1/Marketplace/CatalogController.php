@@ -121,4 +121,16 @@ class CatalogController extends Controller
             'data' => $rows->map(fn ($item) => MarketplacePresenter::listing($item))->values(),
         ]);
     }
+
+    public function listing(string $listing)
+    {
+        $model = \App\Models\Marketplace\Listing::with('shop')
+            ->where('public_id', $listing)
+            ->where('status', 'approved')
+            ->where('available', true)
+            ->whereHas('shop', fn ($query) => $query->where('status', 'approved'))
+            ->firstOrFail();
+
+        return response()->json(['data' => MarketplacePresenter::listing($model)]);
+    }
 }

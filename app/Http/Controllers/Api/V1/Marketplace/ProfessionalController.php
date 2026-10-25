@@ -12,6 +12,17 @@ class ProfessionalController extends Controller
 {
     use PresentsMarketplaceCareer;
 
+    public function publicShare(string $profile)
+    {
+        $row = DB::table('marketplace_professional_profiles')->where('public_id', $profile)->first();
+        abort_unless($row && $row->status === 'approved' && $row->visibility === 'public', 404);
+
+        $payload = $this->professionalPayload($row, false);
+        unset($payload['userId'], $payload['profilePhotoPath'], $payload['cvDocumentId'], $payload['cvUrl'], $payload['visibility'], $payload['contactVisibility'], $payload['rejectionReason']);
+
+        return response()->json(['data' => $payload]);
+    }
+
     public function photo(Request $request)
     {
         return app(UploadController::class)->image($request);
@@ -80,7 +91,7 @@ class ProfessionalController extends Controller
             'certifications' => 'nullable|array|max:30',
             'experience' => 'nullable|array|max:40',
             'availability' => 'nullable|in:open,available_soon,not_available',
-            'visibility' => 'nullable|in:companies,private',
+            'visibility' => 'nullable|in:public,companies,private',
             'contactVisibility' => 'nullable|in:companies,after_interest,private',
         ]);
 
