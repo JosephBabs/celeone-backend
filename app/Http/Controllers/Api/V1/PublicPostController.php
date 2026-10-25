@@ -8,13 +8,14 @@ class PublicPostController {
   $record=Post::where('firebase_id',$id)->orWhere('id',ctype_digit($id)?(int)$id:-1)->first();
   $canonical=(string)($record?->firebase_id ?: $id);
   $row=DB::table('firebase_documents')->where('collection_path','posts')->where('document_id',$canonical)->first();
+  if(!$row && $canonical!==$id){$row=DB::table('firebase_documents')->where('collection_path','posts')->where('document_id',$id)->first();}
   abort_unless($row||$record,404);
   $p=$row?(json_decode($row->payload,true) ?: []):(array)($record->legacy_data??[]);
   $status=strtolower((string)($p['status']??$record?->status??'published'));
   $audience=strtolower((string)($p['audience']??$p['visibility']??$record?->audience??'public'));
   abort_unless(in_array($status,['published','active','approved'],true) && $audience==='public',404);
   abort_if(!empty($p['isPrivate']) || !empty($p['deletedAt']) || !empty($p['deleted']) || !empty($p['isDeleted']) || ($record && ($record->audience!=='public' || !in_array($record->status,['published','active','approved'],true))),404);
-  $allowed=['title','content','body','text','description','shareTitle','shareDescription','shareImage','image','imageUrl','images','media','videoUrl','thumbnailUrl','previewUrl','smallUrl','variants','type','authorName','posterName','createdAt','createdAtMs'];
+  $allowed=['title','content','body','text','description','shareTitle','shareDescription','shareImage','image','imageUrl','images','media','videoUrl','thumbnailUrl','posterUrl','previewUrl','smallUrl','variants','type','authorName','posterName','createdAt','createdAtMs'];
   abort_if(in_array(strtolower((string)($p['moderationStatus']??'')),['rejected','blocked','removed'],true),404);
   $result=array_intersect_key($p,array_flip($allowed));$result['id']=$canonical;
   $result['content']=$p['content']??$p['body']??$p['text']??$record?->text_content??'';
