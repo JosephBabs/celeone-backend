@@ -51,9 +51,9 @@ class CreatorContentModerationController extends Controller
                     || ($mediaType === '' && in_array($legacyCollection, ['movies', 'videos'], true));
                 abort_unless($isSong || $isVideo, 422, 'Unsupported Creator Studio media type.');
 
-                $publishedCollection = in_array($legacyCollection, ['songs', 'movies', 'videos'], true) && $legacyContentId
-                    ? $legacyCollection
-                    : ($isSong ? 'songs' : 'movies');
+                // Keep songs in their existing catalog. Approved video content
+                // belongs in `videos`, even when a legacy target points to `movies`.
+                $publishedCollection = $isSong ? 'songs' : 'videos';
                 $publishedContentId = trim((string) ($submission['publishedContentId'] ?? '')) ?: ($legacyContentId ?: $id);
                 if ($oldCollection && $oldContentId && ($oldCollection !== $publishedCollection || $oldContentId !== $publishedContentId)) {
                     DB::table('firebase_documents')->where('collection_path', $oldCollection)->where('document_id', $oldContentId)->delete();
